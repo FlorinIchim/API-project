@@ -1,0 +1,493 @@
+#include <Arduino.h>
+#include <BluetoothSerial.h>
+#include <ArduinoJson.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+ 
+
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+#error Bluetooth is not enabled! Please run make menuconfig to and enable it
+#endif
+
+#define btcServerName "ESP32.412A:Micu_Ichim" // BTC server name
+
+
+// Define the BluetoothSerial
+BluetoothSerial SerialBT;
+
+String data = "";                   // Received data
+
+String teamID = "";                 // Received teamID (acts as a key in communications between the pia app and esp32)
+
+
+void connect_wifi(String JSONString, String teamid)
+{
+    String ssid = "";
+    String password = "";
+
+    DynamicJsonDocument JSONDocument(15000);
+    DeserializationError error = deserializeJson(JSONDocument, JSONString.c_str());
+
+    DynamicJsonDocument JSONDocument_result(15000);
+
+    if (error)
+    {
+        Serial.println(error.c_str());
+    }
+    else
+    {
+        ssid = JSONDocument["ssid"].as<String>();
+        password = JSONDocument["password"].as<String>();
+
+        Serial.print("\nssid chosen: ");
+        Serial.println(ssid);
+        JSONDocument_result["ssid"] = ssid;
+        Serial.print("password: ");
+        Serial.println(password);
+    }
+
+    const long connection_timeout = 15000; // 15s
+    long startConnection = 0;
+   
+
+    // Set WiFi to station mode and disconnect from an AP if it
+    // was previously connected
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(100);
+
+    // Initialize the WiFi network
+    WiFi.begin(ssid.c_str(), password.c_str());
+    Serial.println("\nConnecting");
+
+    // Connect to the network
+    // Check the connection status in a loop every 0.5 seconds
+    // Since the connection can take some time and might fail,
+    // it is necessary to check the connection status before
+    // proceeding. To define a timeout for the action, the
+    // current counter of the timer is stored
+    startConnection = millis();
+    while (WiFi.status() != WL_CONNECTED)
+    {
+        Serial.print(".");
+        delay(100);
+
+        // Check if the defined timeout is exceeded
+        if (millis() - startConnection > connection_timeout)
+        {
+            break;
+        }
+    }
+    Serial.println("");
+
+    // Check if connection was successful & send result to app
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        Serial.println("Connection failed");
+        JSONDocument_result["connected"] = false;
+    }
+    else
+    {
+        Serial.print("Connected to network: ");
+        Serial.println(WiFi.SSID());
+        Serial.print("Local IP address: ");
+        Serial.println(WiFi.localIP());
+        JSONDocument_result["connected"] = true;
+    }
+
+    JSONDocument_result["teamId"] = teamid;
+    
+    String wifi_status = "";
+    serializeJson(JSONDocument_result, wifi_status);
+
+    SerialBT.println(wifi_status);
+}
+
+String get_action(String JSONString)
+{
+    DynamicJsonDocument JSONDocument(15000);
+    DeserializationError error = deserializeJson(JSONDocument, JSONString.c_str());
+
+    if (error)
+    {
+        Serial.println(error.c_str());
+        return "";
+    }
+    else
+    {
+        String action = JSONDocument["action"];
+        return action;
+    }
+}
+
+
+void get_data(String teamid)
+{
+    // Define the HTTP client
+    HTTPClient http;
+
+    // URL
+    String url = "http://proiectia.bogdanflorea.ro/api/breaking-bad/characters";
+
+    // Define the connection parameters and, optionally,
+    // set the connection timeout, especially if accessing
+    // a server with a longer response time (such as a
+    // free API server)
+    http.begin(url);
+    http.setConnectTimeout(30000); // connect timeout
+    http.setTimeout(30000);        // response timeout
+
+    // Send HTTP request
+    int httpResponseCode = http.GET();
+
+    // Check response code
+    if (httpResponseCode > 0)
+    {
+        Serial.print("HTTP Response code: ");
+        Serial.println(httpResponseCode);
+
+        // Get response data
+        String payload = http.getString();
+
+        DynamicJsonDocument JSONDocument(15000);
+        DeserializationError error = deserializeJson(JSONDocument, payload.c_str());
+
+        if (error)
+        {
+            Serial.println(error.c_str());
+        }
+        else
+        {
+            // Define a JsonArray from the JSONDocument, since the JSONString is an array of objects
+            JsonArray list = JSONDocument.as<JsonArray>();
+
+            // Iterate the JsonArray array
+            for (JsonVariant value : list)
+            {
+                // Get the current item in the iterated list as a JsonObject
+                JsonObject listItem = value.as<JsonObject>();
+
+                // Create JSON Document response
+                DynamicJsonDocument JSONDocument_response(4096);
+
+                JSONDocument_response["id"] = listItem["char_id"];
+                JSONDocument_response["name"] = listItem["name"];
+               String imageurl = listItem["img"];
+                JSONDocument_response["image"] = imageurl.c_str();
+                JSONDocument_response["teamId"] = teamid;
+
+                // Serialize json response document & send to pia app
+                String get_data_json = "";
+                serializeJson(JSONDocument_response, get_data_json);
+                Serial.println(get_data_json);
+                SerialBT.println(get_data_json);
+                delay(100);
+              
+            }
+        }
+    }
+    else
+    {
+        Serial.print("Error code: ");
+        Serial.println(httpResponseCode);
+    }
+    // Free resources - terminate the http object
+    http.end();
+}
+
+String get_id(String JSONString)
+{
+    DynamicJsonDocument JSONDocument(15000);
+    DeserializationError error = deserializeJson(JSONDocument, JSONString.c_str());
+
+    if (error)
+    {
+        Serial.println(error.c_str());
+        return "";
+    }
+    else
+    {
+        String id = JSONDocument["id"];
+        return id;
+    }
+}
+
+String get_url(String id)
+{
+    String url = "http://proiectia.bogdanflorea.ro/api/breaking-bad/character?char_id=" + id;
+    return url;
+}
+
+void get_details(String url, String teamid)
+{
+    // Define the HTTP client
+    HTTPClient http;
+
+    // Define the connection parameters and, optionally,
+    // set the connection timeout, especially if accessing
+    // a server with a longer response time (such as a
+    // free API server)
+    http.begin(url);
+    http.setConnectTimeout(30000); // connect timeout
+    http.setTimeout(30000);        // response timeout
+
+    // Send HTTP request
+    // In this exemple, the GET method is used, according to
+    // the API docs
+    int httpResponseCode = http.GET();
+
+    // Check response code
+    if (httpResponseCode > 0)
+    {
+        Serial.print("HTTP Response code: ");
+        Serial.println(httpResponseCode);
+        
+        // Get response data
+        String payload = http.getString();
+
+DynamicJsonDocument JSONDocument(15000);
+
+DeserializationError error = deserializeJson(JSONDocument, payload);
+
+if (error) {
+  Serial.print("deserializeJson() failed: ");
+  Serial.println(error.c_str());
+  return;
+}
+
+String char_id = JSONDocument["char_id"]; // 17
+String name = JSONDocument["name"]; // "Skinny Pete"
+String birthday = JSONDocument["birthday"]; // "Unknown"
+
+String occupation_0 = JSONDocument["occupation"][0]; // "Low-level meth distributer"
+
+String img = JSONDocument["img"]; // "https://bogdanflorea.ro/images/breaking-bad/skinny-pete-17.png"
+String status = JSONDocument["status"]; // "Alive"
+String nickname = JSONDocument["nickname"]; // "Skinny"
+
+JsonArray appearance = JSONDocument["appearance"];
+int appearance_0 = appearance[0]; // 1
+int appearance_1 = appearance[1]; // 2
+ 
+
+String  portrayed = JSONDocument["portrayed"]; // "Charles Baker"
+
+
+        // create new jsondocument with response data
+        DynamicJsonDocument JSONDocument_response(15000);
+
+        JSONDocument_response["id"] = char_id;
+        JSONDocument_response["name"] = name;
+        JSONDocument_response["image"] = img.c_str();
+        JSONDocument_response["description"] = "birthday: " + birthday + "\n" + "occupation: " + occupation_0 + "\n" + "status: " + status + "\n" + "nickname: " + nickname + "\n" + "appearance_0: " + appearance_0 + "\n" + "appearance_1: " + appearance_1 + "\n" +"portrayed: " + portrayed;
+				JSONDocument_response["teamId"] = teamid;
+
+        String get_details_response = "";
+        serializeJson(JSONDocument_response, get_details_response);
+
+        delay(500);
+
+        SerialBT.println(get_details_response);
+        Serial.println(get_details_response);
+
+        delay(500);
+    }
+    else
+    {
+        Serial.print("Error code: ");
+        Serial.println(httpResponseCode);
+    }
+
+    http.end();
+}
+
+
+
+// The receivedData function is called when data is available on Bluetooth (see loop function)
+void receivedData()
+{
+  // Read the data using the appropriate SerialBT functions
+  // according to the app specifications
+  // The data is terminated by the new line character (\n)
+  while (SerialBT.available())
+  {
+    data = SerialBT.readStringUntil('\n');
+  }
+
+  Serial.println(data); // <-- This is the message sent from the app, according to the specs
+
+  delay(500);
+
+  if (get_action(data) == "getNetworks")
+  {
+    Serial.print("\naction received: ");
+    Serial.println(get_action(data));
+
+    // set teamID only one
+    if(teamID == "")
+    {
+      teamID = get_teamid(data);
+    }
+
+    // verify teamid is set up correctly in main program
+    Serial.print("Team ID received: ");
+    Serial.println(teamID); 
+
+    // Scan WiFi networks & send the list to PIA App
+    scan_wifi(teamID);
+  }
+
+  delay(500);
+
+  if (get_action(data) == "connect")
+  {
+    Serial.print("\naction received: ");
+    Serial.println(get_action(data));
+
+    // Connect to the chosen WiFi by the PIA App
+    connect_wifi(data, teamID);
+  }
+
+  delay(500);
+
+  if (get_action(data) == "getData")
+  {
+    Serial.print("\naction received: ");
+    Serial.println(get_action(data));
+
+    // Send hero list to PIA App
+    get_data(teamID);
+  }
+
+  delay(500);
+
+  if (get_action(data) == "getDetails")
+  {
+    Serial.print("\naction received: ");
+    Serial.println(get_action(data));
+
+    String id = get_id(data); // id of hero
+    String url = get_url(id); // url of hero
+
+    Serial.println("");
+    Serial.println(url);
+    Serial.println("");
+
+    // Send selected hero details to PIA App
+    get_details(url, teamID);
+  }
+
+  // Reset the received data string after processing
+  data = "";
+}
+
+
+String get_teamid(String JSONString)
+{
+    DynamicJsonDocument JSONDocument(15000);
+    DeserializationError error = deserializeJson(JSONDocument, JSONString.c_str());
+
+    if (error)
+    {
+        Serial.println(error.c_str());
+        return "";
+    }
+    else
+    {
+        String teamId = JSONDocument["teamId"];
+        return teamId;
+    }
+}
+
+void scan_wifi(String teamid)
+{
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(500);
+
+    Serial.println("\nscan start");
+
+    // WiFi.scanNetworks will return the number of networks found
+    int n = WiFi.scanNetworks();
+    Serial.println("scan done");
+    if (n == 0)
+    {
+        Serial.println("no networks found");
+    }
+    else
+    {
+        Serial.print(n);
+        Serial.println(" networks found");
+        for (int i = 0; i < n; ++i)
+        {
+            // Print SSID and RSSI for each network found to serial console
+            Serial.print(i + 1);
+            Serial.print(": ");
+            Serial.print(WiFi.SSID(i));
+            Serial.print(" (");
+            Serial.print(WiFi.RSSI(i));
+            Serial.print(")");
+            Serial.println((WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? " " : "*");
+
+            
+            DynamicJsonDocument JSONDocument(15000);
+            JSONDocument["ssid"] = WiFi.SSID(i);
+            JSONDocument["strength"] = WiFi.RSSI(i);
+
+            switch (WiFi.encryptionType(i))
+            {
+
+            case 0:
+                JSONDocument["encryption"] = "open";
+                break;
+            case 1:
+                JSONDocument["encryption"] = "WEP";
+                break;
+            case 2:
+                JSONDocument["encryption"] = "WPA_PSK";
+                break;
+
+            case 3:
+                JSONDocument["encryption"] = "WPA2_PSK";
+                break;
+
+             case 4:
+                JSONDocument["encryption"] = "WPA_WPA2_PSK";
+                break;
+
+            case 5:
+                JSONDocument["encryption"] = "WPA2_ENTERPRISE";
+                break;
+            default:
+                JSONDocument["encryption"] = "";
+                break;
+            }
+
+            JSONDocument["teamId"] = teamid;
+
+            String wifi_list = "";
+            serializeJson(JSONDocument, wifi_list);
+
+            SerialBT.println(wifi_list);
+        }
+    }
+    Serial.println("");
+}
+
+void setup()
+{
+  Serial.begin(115200);
+
+  // Initialize BTC
+  SerialBT.begin(btcServerName); // Bluetooth device name
+  Serial.println("The device started, now you can pair it with bluetooth!\n");
+}
+
+void loop()
+{
+  // Check available Bluetooth data and perform read from the app
+  if (SerialBT.available())
+  {
+    receivedData();
+  }
+}
